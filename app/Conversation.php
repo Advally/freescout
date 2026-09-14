@@ -1285,10 +1285,10 @@ class Conversation extends Model
         // access to the target mailbox.
         // https://github.com/freescout-help-desk/freescout/issues/5333
         $conv_user = $user;
-        if ($this->user_id != $user->id) {
+        if ($this->user_id && $this->user_id != $user->id) {
             $conv_user = $this->user;
         }
-        if (!$conv_user->can('view', $mailbox)) {
+        if ($conv_user && !$conv_user->can('view', $mailbox)) {
             $this->changeUser(self::USER_UNASSIGNED, $user, $create_thread = true);
         }
 
