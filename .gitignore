@@ -37,3 +37,6 @@ Thumbs.db
 .phpunit.result.cache
 /.phpunit.cache
 .env.testing
+
+# Written on the box by .github/workflows/deploy.yml (IT 1854)
+.deployed-sha

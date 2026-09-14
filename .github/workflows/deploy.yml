@@ -1,0 +1,134 @@
+# Deploy standard for a git-checkout service on an Advally droplet (IT #1854, shape A).
+#
+# Copy to <repo>/.github/workflows/deploy.yml, fill the env: block, commit.
+# Docs: templates/README.md in Advally/advally-launch.
+#
+# What it does, in order: SSH to the box as the unprivileged `deploy` user,
+# fetch and `git checkout --detach <sha>` as the web user, write
+# <path>/.deployed-sha, restart the unit through a sudoers allowlist, then wait
+# for the unit to be active and the health URL to answer. Any failure fails the run.
+#
+# Rollback: dispatch this workflow with `sha` = the previous deployed sha. The
+# run log prints it as "rollback target" before anything changes.
+#
+# Box prerequisites (once per droplet, by hand): a `deploy` user whose
+# ~/.ssh/authorized_keys holds the public half of the DEPLOY_SSH_KEY secret,
+# and /etc/sudoers.d/deploy granting NOPASSWD for
+#   (root)      /usr/bin/systemctl restart <unit>
+#   (<webuser>) /usr/bin/git *, /usr/bin/tee /var/www/*/.deployed-sha
+# The checkout must already exist, owned by <webuser>, with an origin remote
+# that fetches without a prompt (a read-only deploy key on an ssh alias).
+
+name: Deploy
+
+on:
+  push:
+    branches: [advally-prod]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit to deploy. Blank = head of the default branch. For a rollback, paste the previous .deployed-sha.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# One deploy at a time per checkout; a queued run waits, never cancels a live one.
+concurrency:
+  group: deploy-freescout
+  cancel-in-progress: false
+
+env:
+  DEFAULT_BRANCH: advally-prod
+  DEPLOY_HOST: 159.65.45.147            # advally-prod
+  DEPLOY_USER: deploy
+  DEPLOY_PATH: /var/www/service.advally.com
+  DEPLOY_UNIT: php8.3-fpm.service        # pool freescout.conf lives in the shared fpm unit
+  DEPLOY_WEBUSER: freescout
+  HEALTH_URL: http://127.0.0.1/
+  HEALTH_OK_CODES: "200 301 302"
+  HEALTH_TIMEOUT: "60"
+  HEALTH_HOST: service.advally.com      # name-based vhost: curl must send the Host header
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.sha || 'default-branch head' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Resolve the sha to deploy
+        id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          set -eu
+          if [ -n "$INPUT_SHA" ]; then
+            SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${INPUT_SHA}" -q .sha)"
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            SHA="${GITHUB_SHA}"
+          else
+            SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${DEFAULT_BRANCH}" -q .sha)"
+          fi
+          echo "deploying ${SHA}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout, restart, health-gate on the box
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+        with:
+          host: ${{ env.DEPLOY_HOST }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          command_timeout: 10m
+          envs: SHA,DEPLOY_PATH,DEPLOY_UNIT,DEPLOY_WEBUSER,HEALTH_URL,HEALTH_OK_CODES,HEALTH_TIMEOUT,HEALTH_HOST
+          script: |
+            set -eu
+            G="sudo -n -u $DEPLOY_WEBUSER /usr/bin/git -C $DEPLOY_PATH"
+
+            PREV="$(cat "$DEPLOY_PATH/.deployed-sha" 2>/dev/null || $G rev-parse HEAD)"
+            echo "rollback target (previous deployed sha): $PREV"
+
+            # A hand-edit to a tracked file on the box is a divergence, not something to paper over.
+            DIRTY="$($G status --porcelain --untracked-files=no)"
+            if [ -n "$DIRTY" ]; then
+              echo "ERROR: tracked changes on the box; commit or discard them first:"; echo "$DIRTY"; exit 1
+            fi
+
+            echo "==> fetch + checkout --detach $SHA"
+            $G fetch --quiet origin
+            $G cat-file -e "${SHA}^{commit}"
+            $G checkout --quiet --detach "$SHA"
+            NOW="$($G rev-parse HEAD)"
+            [ "$NOW" = "$SHA" ] || { echo "ERROR: HEAD is $NOW, wanted $SHA"; exit 1; }
+            printf '%s\n' "$NOW" | sudo -n -u "$DEPLOY_WEBUSER" /usr/bin/tee "$DEPLOY_PATH/.deployed-sha" >/dev/null
+            echo "    .deployed-sha = $(cat "$DEPLOY_PATH/.deployed-sha")"
+
+            # vendor/ is committed on this branch (no composer step). Queue workers are started by
+            # the freescout crontab's schedule:run; queue:restart makes them exit after the current
+            # job so the next minute's worker runs the new code.
+            echo "==> php artisan queue:restart (as $DEPLOY_WEBUSER)"
+            sudo -n -u "$DEPLOY_WEBUSER" /usr/bin/php "$DEPLOY_PATH/artisan" queue:restart
+            echo "==> systemctl restart $DEPLOY_UNIT"
+            sudo -n /usr/bin/systemctl restart "$DEPLOY_UNIT"
+
+            echo "==> waiting up to ${HEALTH_TIMEOUT}s for active + healthy"
+            ok=""
+            for i in $(seq 1 "$HEALTH_TIMEOUT"); do
+              if systemctl is-active --quiet "$DEPLOY_UNIT"; then
+                if [ -z "$HEALTH_URL" ]; then ok=1; break; fi
+                code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' -H "Host: $HEALTH_HOST" "$HEALTH_URL" || true)"
+                case " $HEALTH_OK_CODES " in *" $code "*) ok=1; echo "    $HEALTH_URL -> $code"; break;; esac
+              fi
+              sleep 1
+            done
+            if [ -z "$ok" ]; then
+              echo "ERROR: $DEPLOY_UNIT not active+healthy after ${HEALTH_TIMEOUT}s"
+              systemctl status "$DEPLOY_UNIT" --no-pager 2>&1 | head -30 || true
+              echo "rollback: dispatch this workflow with sha=$PREV"
+              exit 1
+            fi
+            echo "deployed $NOW; unit $DEPLOY_UNIT active"
