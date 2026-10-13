@@ -532,7 +532,17 @@ class FetchEmails extends Command
             // Without this, FreeScout fetches its own "Unable to process" auto-reply,
             // resolves the embedded user_id, mismatches the From, and dispatches
             // ANOTHER auto-reply -> infinite loop.
-            if ($message_header && \MailHelper::isAutoResponder($message_header)) {
+            //
+            // ADVALLY 2026-10-13 (IT #2990): vendor helpdesks (GumGum, Vuukle
+            // Support) send their agents' real replies with "Auto-Submitted:
+            // auto-generated", and this check dropped them for good. A sender
+            // outside our own mailboxes whose only auto header is that one is
+            // now fetched. Nothing replies to it: every mailbox has
+            // auto_reply_enabled=0, SendAutoReply skips auto-responder threads,
+            // and a reply to a user notification still skips them below.
+            if ($message_header && \MailHelper::isAutoResponder($message_header)
+                && !$this->isExternalHelpdeskReply($message_header, $from)
+            ) {
                 $this->logError("Skipping auto-responder email (early check)");
                 $this->setSeen($message, $mailbox);
                 return;
@@ -1735,6 +1745,45 @@ class FetchEmails extends Command
         }
 
         return $attr;
+    }
+
+    /**
+     * ADVALLY (IT #2990): true when an auto-submitted message is a vendor
+     * helpdesk reply worth keeping, not a loop risk. Its only auto header is
+     * "Auto-Submitted: auto-generated" (no vacation/auto-reply header, no
+     * bulk or list precedence), and it comes from outside our own domains and
+     * FreeScout mailboxes.
+     */
+    public function isExternalHelpdeskReply($headers_str, $from)
+    {
+        $from = strtolower(trim((string)$from));
+        if (!$from || preg_match('/@(advally\.com|ouvrix\.com)$/', $from)
+            || \App\Mailbox::where('email', $from)->exists()
+        ) {
+            return false;
+        }
+
+        $auto_generated = false;
+        foreach (explode("\n", (string)$headers_str) as $header) {
+            $parts = explode(':', $header, 2);
+            if (count($parts) != 2) {
+                continue;
+            }
+            $name = strtolower(trim($parts[0]));
+            $value = strtolower(trim($parts[1]));
+            if ($name == 'auto-submitted') {
+                if ($value != 'auto-generated') {
+                    return false;
+                }
+                $auto_generated = true;
+            } elseif (in_array($name, ['x-autoreply', 'x-autorespond', 'x-autoresponder', 'precedence', 'x-precedence'])) {
+                return false;
+            } elseif ($name == 'delivered-to' && $value == 'autoresponder') {
+                return false;
+            }
+        }
+
+        return $auto_generated;
     }
 
     public function headerToStr($header)
