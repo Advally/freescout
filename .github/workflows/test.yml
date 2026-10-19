@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     name: Test App (MySQL)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         php: ['7.3', '7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']

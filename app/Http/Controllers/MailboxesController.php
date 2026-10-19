@@ -682,6 +682,8 @@ class MailboxesController extends Controller
         ];
 
         $mailbox->fill($data);
+        $mailbox->auto_reply_message = \Helper::purifyHtml($mailbox->auto_reply_message);
+        // To be 100% sure.
         $mailbox->auto_reply_message = \Helper::stripDangerousTags($mailbox->auto_reply_message);
 
         $mailbox->save();
@@ -1096,7 +1098,7 @@ class MailboxesController extends Controller
         $this->authorize('admin', $mailbox);
         
         if (csrf_token() != $request->token) {
-            return throw new \Illuminate\Session\TokenMismatchException;
+            throw new \Illuminate\Session\TokenMismatchException;
         }
 
         // oAuth Disconnect.
