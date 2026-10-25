@@ -27,6 +27,13 @@ class Mail
     const MESSAGE_ID_PREFIX_REPLY_TO_CUSTOMER = 'FS_reply';
     const MESSAGE_ID_PREFIX_AUTO_REPLY = 'FS_autoreply';
 
+    public static $all_message_id_prefixes = [
+        self::MESSAGE_ID_PREFIX_NOTIFICATION,
+        self::MESSAGE_ID_PREFIX_NOTIFICATION_IN_REPLY,
+        self::MESSAGE_ID_PREFIX_REPLY_TO_CUSTOMER,
+        self::MESSAGE_ID_PREFIX_AUTO_REPLY,
+    ];
+
     /**
      * Mail drivers.
      */
@@ -837,7 +844,7 @@ class Mail
 
     public static function isGeneratedMessageId($message_id)
     {
-        return preg_match("#^fs\-[a-z0-9]+@#", $message_id);
+        return preg_match("#^fs\-[a-z0-9]+@#", $message_id ?? '');
     }
 
     /**
@@ -1506,6 +1513,11 @@ class Mail
             $string = str_ireplace('=?'.$from.'?', '=?'.$into.'?', $string);
         }
         return $string;
+    }
+
+    public static function isFsMessageId($message_id)
+    {
+        return preg_match('/^('.implode('|', self::$all_message_id_prefixes).')/i', $message_id);
     }
 
     // public static function oauthGetProvider($provider_code, $params)

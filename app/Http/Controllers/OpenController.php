@@ -27,7 +27,7 @@ class OpenController extends Controller
      *
      * @return \Illuminate\Http\Response
      */
-    public function userSetup($hash)
+    public function userSetup($hash, $invite_sent_at)
     {
         if (auth()->user()) {
             return redirect()->route('dashboard');
@@ -38,13 +38,17 @@ class OpenController extends Controller
             \Helper::setLocale($user->locale);
         }
 
+        if ($user && !$this->isInviteExpirationValid($invite_sent_at, $user)) {
+            $user = null;
+        }
+
         return view('open/user_setup', ['user' => $user]);
     }
 
     /**
      * Save user from invitation.
      */
-    public function userSetupSave($hash, Request $request)
+    public function userSetupSave($hash, $invite_sent_at, Request $request)
     {
         if (auth()->user()) {
             return redirect()->route('dashboard');
@@ -53,6 +57,10 @@ class OpenController extends Controller
 
         if (!$user) {
             abort(404);
+        }
+
+        if (!$this->isInviteExpirationValid($invite_sent_at, $user)) {
+            \Helper::denyAccess();
         }
 
         $validator = Validator::make($request->all(), [
@@ -82,7 +90,7 @@ class OpenController extends Controller
         });
 
         if ($validator->fails()) {
-            return redirect()->route('user_setup', ['hash' => $hash])
+            return redirect()->route('user_setup', ['hash' => $hash, 'invite_sent_at' => $invite_sent_at])
                         ->withErrors($validator)
                         ->withInput();
         }
@@ -114,25 +122,44 @@ class OpenController extends Controller
         return redirect()->route('dashboard');
     }
 
+    public function isInviteExpirationValid($invite_sent_at, $user)
+    {
+        $invite_sent_at = \Helper::decrypt($invite_sent_at, $user->password);
+
+        if (!$invite_sent_at 
+            || !is_numeric($invite_sent_at) 
+            || (int)$invite_sent_at < time() - User::INVITE_TTL_DAYS*86400
+        ) {
+            return false;
+        }
+
+        return true;
+    }
+
     /*
      * Set a thread as read by customer
      */
-    public function setThreadAsRead($conversation_id, $thread_id)
+    public function setThreadAsRead($conversation_id, $thread_id, $hash)
     {
+        $mark_as_read = true;
+
         $conversation = Conversation::findOrFail($conversation_id);
         $thread = Thread::findOrFail($thread_id);
 
         if ((int)$thread->conversation_id !== (int)$conversation_id) {
-            return \Helper::denyAccess();
+            $mark_as_read = false;
+        } elseif ($hash != Thread::getOpenTrackingHash($thread, $conversation, $conversation->mailbox)) {
+            $mark_as_read = false;
         }
 
         // We only track the first opening
-        if (empty($thread->opened_at)) {
+        if ($mark_as_read && empty($thread->opened_at)) {
             $thread->opened_at = date('Y-m-d H:i:s');
             $thread->save();
             \Eventy::action('thread.opened', $thread, $conversation);
         }
 
+        // We return always the same result for security purposes.
         // Create a 1x1 ttransparent pixel and return it
         $pixel = sprintf('%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c', 71, 73, 70, 56, 57, 97, 1, 0, 1, 0, 128, 255, 0, 192, 192, 192, 0, 0, 0, 33, 249, 4, 1, 0, 0, 0, 0, 44, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 68, 1, 0, 59);
         $response = \Response::make($pixel, 200);
